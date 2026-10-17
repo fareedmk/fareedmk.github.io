@@ -270,6 +270,10 @@ suite("PostgreSQL mock ordering", () => {
     await drain();
     expect((await db.order.findUniqueOrThrow({ where: { id: initial.orderId } })).paymentState).toBe("FAILED");
     expect(await db.mockProviderRecord.count({ where: { orderId: initial.orderId, operation: "ORDER" } })).toBe(1);
+    expect((await status(request("/status", { status: "ACCEPTED" }), context({ id: initial.orderId }))).status).toBe(409);
+    const cancelled = await status(request("/status", { status: "CANCELLED" }), context({ id: initial.orderId }));
+    expect(cancelled.status).toBe(200);
+    expect(await cancelled.json()).toMatchObject({ fulfillmentState: "CANCELLED", paymentState: "FAILED" });
   });
   it("backs off unavailable payment jobs and preserves the reservation", async () => {
     const initial = await order("OUTAGE");
@@ -355,6 +359,11 @@ suite("PostgreSQL mock ordering", () => {
     const fullyRefunded = await db.order.findUniqueOrThrow({ where: { id: initial.orderId } });
     expect(fullyRefunded.refundedAmount).toBe(350);
     expect(fullyRefunded.paymentState).toBe("REFUNDED");
+    expect(fullyRefunded.fulfillmentState).toBe("SUBMITTED");
+    expect((await status(request("/status", { status: "ACCEPTED" }), context({ id: initial.orderId }))).status).toBe(409);
+    const cancelled = await status(request("/status", { status: "CANCELLED" }), context({ id: initial.orderId }));
+    expect(cancelled.status).toBe(200);
+    expect(await cancelled.json()).toMatchObject({ fulfillmentState: "CANCELLED", paymentState: "REFUNDED" });
   });
   it("supports strictly validated PERCENT promotion create/update/delete", async () => {
     const created = await savePromotion(request("/api/admin/promotions", {

@@ -88,8 +88,10 @@ export const status = route(async (request, context) => {
     const current = await tx.order.findFirst({ where: { id, locationId: locationId() } });
     if (!current) throw new HttpError(404, "NOT_FOUND");
     if (current.fulfillmentState === input.status) return current;
-    const knownPayment = ["PAID", "PARTIALLY_REFUNDED", "REFUNDED", "FAILED"].includes(current.paymentState);
-    if (input.status === "CANCELLED" ? !knownPayment : !["PAID", "PARTIALLY_REFUNDED"].includes(current.paymentState)) throw new HttpError(409, "INVALID_TRANSITION");
+    const allowedPayments = input.status === "CANCELLED"
+      ? ["PAID", "PARTIALLY_REFUNDED", "REFUNDED", "FAILED"]
+      : ["PAID", "PARTIALLY_REFUNDED"];
+    if (!allowedPayments.includes(current.paymentState)) throw new HttpError(409, "INVALID_TRANSITION");
     try { transitionFulfillment(current.fulfillmentState as FulfillmentState, input.status); } catch (error) {
       if (error instanceof DomainError) throw new HttpError(409, error.code);
       throw error;

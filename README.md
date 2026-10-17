@@ -61,6 +61,12 @@ npm audit
 
 Integration tests require `DATABASE_URL` and mock mode; read their setup before execution. Browser tests require a freshly seeded mock database with future slots. Start the worker to advance submitted orders. The browser suite is a targeted subset, **not** all requested production acceptance scenarios.
 
+### Delivery verification
+
+Executed successfully: **34 domain tests, 26 PostgreSQL integration tests, and 9 mobile Chromium tests**, plus full TypeScript checking, ESLint, the production Next.js build, Compose configuration validation, and `npm audit` (zero reported vulnerabilities). Browser coverage includes mocked UI recovery regressions as well as actual application API checkout. SQL migrations and seeding were executed against local containerized PostgreSQL.
+
+The complete Docker application image/Compose stack and Azure deployment were not executed. No Clover sandbox, real payment, device, or printer acceptance test was performed. These results do not establish production readiness.
+
 ## Repository structure
 
 ```text

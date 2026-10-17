@@ -5,7 +5,7 @@ CREATE SCHEMA IF NOT EXISTS "public";
 CREATE TABLE "Location" (
     "id" TEXT NOT NULL,
     "name" TEXT NOT NULL,
-    "timeZone" TEXT NOT NULL DEFAULT 'America/Chicago',
+    "timeZone" TEXT NOT NULL DEFAULT 'Europe/London',
     "paused" BOOLEAN NOT NULL DEFAULT false,
 
     CONSTRAINT "Location_pkey" PRIMARY KEY ("id")
