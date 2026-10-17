@@ -67,6 +67,8 @@ Executed successfully: **34 domain tests, 26 PostgreSQL integration tests, and 9
 
 The complete Docker application image/Compose stack and Azure deployment were not executed. No Clover sandbox, real payment, device, or printer acceptance test was performed. These results do not establish production readiness.
 
+The final combined validation tool could not complete automated review (configured model unavailable) or CodeQL analysis (analysis failed). A separate code-review agent found retry-recovery and partial-refund UI issues; fixes and regression coverage were applied. Do not interpret the unavailable tools or “zero alerts” from failed analysis as a security pass.
+
 ## Repository structure
 
 ```text
