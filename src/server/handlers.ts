@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
+import { DomainError, transitionFulfillment, type FulfillmentState } from "../domain";
 import { catalog } from "./catalog";
 import { db, locationId, serializable } from "./db";
 import { checkout, checkoutInput, createQuote, enqueue, listSlots, parse, publicOrder, quoteInput, reservationWhere, type Snapshot } from "./orders";
@@ -79,18 +80,20 @@ export const adminOrders = route(async request => {
   })) });
 });
 
-const transitions: Record<string, string[]> = {
-  NEW: ["ACCEPTED", "REJECTED"], ACCEPTED: ["PREPARING"], PREPARING: ["READY"], READY: ["COLLECTED"],
-};
 export const status = route(async (request, context) => {
   await requireAdmin(request);
   const { id } = await context.params;
-  const input = parse(z.object({ status: z.enum(["ACCEPTED", "REJECTED", "PREPARING", "READY", "COLLECTED"]) }).strict(), await body(request));
+  const input = parse(z.object({ status: z.enum(["ACCEPTED", "CANCELLED", "PREPARING", "READY", "COMPLETED"]) }).strict(), await body(request));
   const order = await serializable(async tx => {
     const current = await tx.order.findFirst({ where: { id, locationId: locationId() } });
     if (!current) throw new HttpError(404, "NOT_FOUND");
     if (current.fulfillmentState === input.status) return current;
-    if (current.paymentState !== "PAID" || !transitions[current.fulfillmentState]?.includes(input.status)) throw new HttpError(409, "INVALID_TRANSITION");
+    const knownPayment = ["PAID", "PARTIALLY_REFUNDED", "REFUNDED", "FAILED"].includes(current.paymentState);
+    if (input.status === "CANCELLED" ? !knownPayment : !["PAID", "PARTIALLY_REFUNDED"].includes(current.paymentState)) throw new HttpError(409, "INVALID_TRANSITION");
+    try { transitionFulfillment(current.fulfillmentState as FulfillmentState, input.status); } catch (error) {
+      if (error instanceof DomainError) throw new HttpError(409, error.code);
+      throw error;
+    }
     const updated = await tx.order.update({ where: { id }, data: { fulfillmentState: input.status } });
     await tx.audit.create({ data: { actor: "owner", action: `FULFILLMENT_${input.status}`, aggregateId: id } });
     return updated;
@@ -114,7 +117,7 @@ export const refund = route(async (request, context) => {
       if (previous.payloadHash !== payloadHash) throw new HttpError(409, "IDEMPOTENCY_CONFLICT");
       return { id: previous.id, status: previous.state };
     }
-    if (order.paymentState !== "PAID") throw new HttpError(409, "PAYMENT_NOT_REFUNDABLE");
+    if (!["PAID", "PARTIALLY_REFUNDED"].includes(order.paymentState)) throw new HttpError(409, "PAYMENT_NOT_REFUNDABLE");
     const reserved = await tx.paymentAttempt.aggregate({ where: { orderId: id, operation: "REFUND", state: { not: "DECLINED" } }, _sum: { amount: true } });
     if ((reserved._sum.amount ?? 0) + input.amount > jsonValue<Snapshot>(order.snapshot).pricing.total) throw new HttpError(409, "REFUND_EXCEEDS_PAYMENT");
     const attempt = await tx.paymentAttempt.create({ data: { orderId: id, operation: "REFUND", key, payloadHash, amount: input.amount } });
@@ -134,7 +137,7 @@ export const reprint = route(async (request, context) => {
   await serializable(async tx => {
     const order = await tx.order.findFirst({ where: { id, locationId: locationId() } });
     if (!order) throw new HttpError(404, "NOT_FOUND");
-    if (!["PAID", "REFUNDED"].includes(order.paymentState)) throw new HttpError(409, "PAYMENT_NOT_CONFIRMED");
+    if (!["PAID", "PARTIALLY_REFUNDED", "REFUNDED"].includes(order.paymentState)) throw new HttpError(409, "PAYMENT_NOT_CONFIRMED");
     const key = `print:${id}:${input.idempotencyKey}`;
     const previous = await tx.outbox.findUnique({ where: { dedupeKey: key } });
     if (previous) {
@@ -186,25 +189,7 @@ export const capacity = route(async request => {
   });
   return NextResponse.json({ ok: true });
 });
-export const promotions = route(async request => {
-  await requireAdmin(request);
-  return NextResponse.json({ promotions: await db.promotion.findMany({ where: { locationId: locationId() }, orderBy: { code: "asc" }, take: 100 }) });
-});
-export const savePromotion = route(async request => {
-  await requireAdmin(request);
-  const input = parse(z.object({ code: z.string().trim().regex(/^[A-Z0-9_-]{3,32}$/),
-    percent: z.number().int().min(1).max(100), limit: z.number().int().min(0).max(100000), active: z.boolean() }).strict(), await body(request));
-  await serializable(async tx => {
-    const previous = await tx.promotion.findUnique({ where: { locationId_code: { locationId: locationId(), code: input.code } } });
-    const used = previous ? await tx.quote.count({ where: { promotionId: previous.id, ...reservationWhere(new Date()) } }) : 0;
-    if (input.limit < used) throw new HttpError(409, "LIMIT_BELOW_RESERVATIONS");
-    await tx.promotion.upsert({ where: { locationId_code: { locationId: locationId(), code: input.code } },
-      update: { percentBps: input.percent * 100, limit: input.limit, active: input.active },
-      create: { locationId: locationId(), code: input.code, percentBps: input.percent * 100, limit: input.limit, active: input.active } });
-    await tx.audit.create({ data: { actor: "owner", action: "PROMOTION_UPDATED", aggregateId: locationId() } });
-  });
-  return NextResponse.json({ ok: true });
-});
+export { promotions, savePromotion } from "./promotions";
 export const retryJob = route(async (request, context) => {
   await requireAdmin(request);
   parse(z.object({ confirm: z.literal(true) }).strict(), await body(request));
@@ -223,8 +208,12 @@ export const integration = route(async request => {
   const orderIds = await db.order.findMany({ where: { locationId: locationId() }, select: { id: true } });
   const deadLetters = await db.outbox.findMany({ where: { state: "DEAD", aggregateId: { in: orderIds.map(order => order.id) } },
     select: { id: true, kind: true, aggregateId: true, attempts: true, lastError: true }, take: 100 });
+  const reconciliationRequired = await db.outbox.findMany({
+    where: { kind: "RECONCILE_PAYMENT", state: { in: ["PENDING", "RUNNING"] }, aggregateId: { in: orderIds.map(order => order.id) } },
+    select: { id: true, aggregateId: true, attempts: true, lastError: true }, take: 100,
+  });
   return NextResponse.json({ mode: "mock", liveIntegration: "BLOCKED", intake: "STAFF_WEB_QUEUE",
-    printing: "REQUEST_ACCEPTANCE_ONLY", deadLetters,
+    printing: "REQUEST_ACCEPTANCE_ONLY", deadLetters, reconciliationRequired, promotions: "PERCENT_ONLY_INTEGER_PERCENT",
     oauth: "UNSUPPORTED", webhooks: "UNSUPPORTED" });
 });
 export const sync = route(async request => {

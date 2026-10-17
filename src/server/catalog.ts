@@ -4,7 +4,7 @@ import { db, locationId } from "./db";
 
 export async function catalog(client: Pick<Prisma.TransactionClient, "product"> = db): Promise<Product[]> {
   const products = await client.product.findMany({ where: { locationId: locationId() },
-    include: { tax: true, groups: { include: { modifiers: true }, orderBy: { id: "asc" } } }, orderBy: { id: "asc" } });
+    include: { tax: true, groups: { include: { modifiers: { orderBy: { id: "asc" } } }, orderBy: { id: "asc" } } }, orderBy: { id: "asc" } });
   return products.map(product => ({
     id: product.id, cloverId: product.cloverId, name: product.name, description: product.description,
     categoryId: product.categoryId, price: product.price, taxBps: product.tax.bps,

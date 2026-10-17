@@ -19,6 +19,7 @@ type Quote = { id: string; token: string; expiresAt: string; pricing: {
 type Selection = { modifierId: string; quantity: number };
 const CART_KEY = "yafi.cart.v1";
 const PENDING_KEY = "yafi.pending.v1";
+const PRE_ORDER_REJECTIONS = ["QUOTE_EXPIRED", "PRICE_CHANGED", "AVAILABILITY_CHANGED", "QUOTE_CHANGED", "MENU_CHANGED", "PROMOTION_UNAVAILABLE", "ORDERING_PAUSED", "SLOT_UNAVAILABLE"];
 const pendingSchema = z.object({ quoteId: z.string(), idempotencyKey: z.string(), mockScenario: z.string(), trackingToken: z.string().regex(/^[A-Za-z0-9_-]{43}$/) });
 const savedCartSchema = z.array(z.object({
   productId: z.string(), quantity: z.number().int().min(1).max(20),
@@ -133,7 +134,7 @@ export default function Storefront() {
   return <>
     <div className="demo-banner">DEVELOPMENT STOREFRONT · Simulated orders & payments only. No real charges.</div>
     <header className="site-header">
-      <a href="/" className="brand" aria-label="YaFI home"><span className="brand-name">{process.env.NEXT_PUBLIC_BUSINESS_NAME ?? "YaFI"}</span><span>COFFEE & GELATO</span></a>
+      <a href="/" className="brand" aria-label="YaFI home">{process.env.NEXT_PUBLIC_LOGO_PATH && <img src={process.env.NEXT_PUBLIC_LOGO_PATH} width="44" height="44" alt="" />}<span className="brand-name">{process.env.NEXT_PUBLIC_BUSINESS_NAME ?? "YaFI"}</span><span>COFFEE & GELATO</span></a>
       <nav aria-label="Main navigation"><a href="#menu">Our menu</a><a href="#our-story">Our story</a><a href="/admin">Staff</a></nav>
       <button className="bag-button" onClick={() => document.getElementById("bag")?.scrollIntoView({ behavior: "smooth" })}>Your bag <span>{count}</span></button>
     </header>
@@ -148,7 +149,7 @@ export default function Storefront() {
         <div className="hero-art" aria-hidden="true"><div className="hero-circle" /><ProductArt name="Coffee" /><span className="art-sticker">SIP. SCOOP.<br />SMILE.</span><span className="art-caption">a little cup of happy</span></div>
       </section>
       <div className="pickup-strip"><span className="status-dot" /><strong>Made fresh. Picked up by you.</strong><span>{menu?.location.name ?? "YaFI café"} · {menu?.location.timeZone ?? "America/Chicago"}</span><span className="pickup-label">PICKUP ONLY</span></div>
-      {offline && <p className="notice" role="status">You’re offline. Your bag is saved on this device; reconnect before checking out.</p>}
+      {offline && <p className="notice" role="status">You’re offline. Keep this page open and reconnect before checking out.</p>}
       {pending && <section className="notice" aria-label="Payment recovery">
         <strong>An earlier payment may still be processing.</strong> Do not start another order for the same purchase.{" "}
         <a className="text-button" href={`/orders/${pending.trackingToken}`}>Check original order</a>{" "}
@@ -156,7 +157,13 @@ export default function Storefront() {
           try {
             await request("/api/checkout", { quoteId: pending.quoteId, idempotencyKey: pending.idempotencyKey, mockScenario: pending.mockScenario });
             window.location.assign(`/orders/${pending.trackingToken}`);
-          } catch (e) { setError((e as Error).message); }
+          } catch (e) {
+            if (e instanceof ApiError && PRE_ORDER_REJECTIONS.includes(e.code)) {
+              try { localStorage.removeItem(PENDING_KEY); } catch { /* Optional device persistence. */ }
+              setPending(null);
+              setError(`${e.message} No order was created by this submission. Review a new quote.`);
+            } else setError((e as Error).message);
+          }
         }}>Retry original submission safely</button>
       </section>}
       {menu?.location.paused && <p className="notice" role="status">Online ordering is paused. You can still browse the menu.</p>}
@@ -255,7 +262,7 @@ function Checkout({ cart, timeZone, onClose }: { cart: CartLine[]; timeZone: str
       try { localStorage.removeItem(CART_KEY); } catch { /* Optional device persistence. */ }
       window.location.assign(`/orders/${encodeURIComponent(result.trackingToken)}`);
     } catch (e) {
-      if (e instanceof ApiError && ["QUOTE_EXPIRED", "PRICE_CHANGED", "AVAILABILITY_CHANGED", "QUOTE_CHANGED", "MENU_CHANGED", "PROMOTION_UNAVAILABLE", "ORDERING_PAUSED", "SLOT_UNAVAILABLE"].includes(e.code)) {
+      if (e instanceof ApiError && PRE_ORDER_REJECTIONS.includes(e.code)) {
         setAttempted(false); setQuote(null);
         try { localStorage.removeItem(PENDING_KEY); } catch { /* Optional device persistence. */ }
         setError(`${e.message} Review a fresh quote before submitting again.`);

@@ -21,7 +21,7 @@ npm run db:seed
 npm run dev
 ```
 
-In another terminal, run `npm run worker`. Both Next.js development and the worker load `.env`. Visit `http://localhost:3000`; staff sign in at `/admin`. No card number or Clover credential is needed.
+In another terminal, run `npm run worker`. Both Next.js development and the worker load `.env`. Visit `http://localhost:3000`; staff sign in at `/admin`. Use synthetic customer details only. No card number or Clover credential is needed.
 
 For the containerized application:
 
@@ -32,6 +32,8 @@ docker compose logs -f web worker
 ```
 
 Compose overrides the database hostname to `db`. The database port is bound only to localhost. Generate URL-safe passwords (for example hexadecimal) to avoid connection-string encoding issues. Seeding is explicit and **mock-only**, not a production release step. `docker compose down` retains the database volume; `down -v` destroys it.
+
+Brand name and an optional root-relative logo path are public build-time settings in `.env.example`; rebuild containers after changing them. Colors and font stacks are the CSS tokens at the top of `src/app/globals.css`. Merchant business information is seeded in `prisma/seed.ts`; a full business-settings editor remains future scope.
 
 ## Working slice
 

@@ -1,7 +1,8 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { money, request } from "./api-client";
+import { z } from "zod";
+import { ApiError, money, request } from "./api-client";
 
 type AdminOrder = {
   id: string; createdAt: string; paymentState: string; integrationState: string; fulfillmentState: string;
@@ -9,9 +10,19 @@ type AdminOrder = {
   snapshot?: unknown; pickupAt?: string; cloverOrderId?: string;
   pricing?: { total: number }; slot?: { startsAt: string };
 };
-type IntegrationHealth = { liveIntegration: string; intake: string; printing: string; deadLetters: { id: string; kind: string; aggregateId: string; lastError: string }[] };
+type IntegrationHealth = {
+  liveIntegration: string; intake: string; printing: string;
+  deadLetters: { id: string; kind: string; aggregateId: string; lastError: string }[];
+  reconciliationRequired?: { id: string; aggregateId: string; attempts: number; lastError: string }[];
+};
 type Promotion = { code: string; percentBps: number; limit: number; active: boolean };
 type AdminSlot = { id: string; startsAt: string; capacity: number; reserved: number };
+const intentSchema = z.object({
+  id: z.string(), kind: z.enum(["refund", "reprint"]),
+  payload: z.object({ confirm: z.literal(true), idempotencyKey: z.string().uuid(), amount: z.number().int().positive().optional() }),
+});
+type AdminIntent = z.infer<typeof intentSchema>;
+const INTENT_KEY = "yafi.admin-intent.v1";
 
 export default function Admin() {
   const [orders, setOrders] = useState<AdminOrder[]>([]);
@@ -23,6 +34,13 @@ export default function Admin() {
   const [health, setHealth] = useState<IntegrationHealth | null>(null);
   const [promotions, setPromotions] = useState<Promotion[]>([]);
   const [slots, setSlots] = useState<AdminSlot[]>([]);
+  const [intent, setIntent] = useState<AdminIntent | null>(null);
+  useEffect(() => {
+    try {
+      const saved = intentSchema.safeParse(JSON.parse(localStorage.getItem(INTENT_KEY) ?? "null"));
+      if (saved.success) setIntent(saved.data);
+    } catch { /* Recovery storage is optional; no payment credentials are stored. */ }
+  }, []);
   const refresh = useCallback(async () => {
     try {
       const result = await request<{ orders: AdminOrder[] }>("/api/admin/orders");
@@ -66,6 +84,29 @@ export default function Admin() {
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   }
+  async function sendIntent(current: AdminIntent) {
+    setIntent(current);
+    setError(""); setMessage("");
+    try {
+      localStorage.setItem(INTENT_KEY, JSON.stringify(current));
+    } catch {
+      setError("Recovery storage is unavailable. Sensitive actions are blocked so uncertain requests cannot be repeated with a new key.");
+      setIntent(null); return;
+    }
+    setBusy(true);
+    try {
+      await request(`/api/admin/orders/${encodeURIComponent(current.id)}/${current.kind}`, current.payload);
+      localStorage.removeItem(INTENT_KEY); setIntent(null);
+      setMessage(current.kind === "refund" ? "Original refund requested. Wait for provider confirmation before requesting another refund." : "Original print request recorded; not physical print confirmation.");
+      await refresh();
+    } catch (e) {
+      if (e instanceof ApiError && [400, 404, 409].includes(e.status)) {
+        try { localStorage.removeItem(INTENT_KEY); } catch { /* Keep the same in-memory intent if storage fails. */ }
+        setIntent(null);
+      }
+      setError(`${(e as Error).message} Uncertain requests must be retried with the original reference.`);
+    } finally { setBusy(false); }
+  }
   return <main className="admin-shell">
     <a href="/" className="brand-name">YaFI</a>
     <p className="eyebrow">STAFF WORKSPACE · MOCK MODE</p><h1>A little care, behind the counter.</h1>
@@ -81,6 +122,10 @@ export default function Admin() {
           try { await request("/api/admin/session", undefined, "DELETE"); setAuthenticated(false); setOrders([]); }
           catch (e) { setError((e as Error).message); }
         }}>Sign out</button></div>
+      {intent && <section className="notice" aria-label="Sensitive action recovery">
+        <strong>A {intent.kind} request may already have been accepted.</strong> Order {intent.id}. Do not create a replacement operation.{" "}
+        <button className="text-button" disabled={busy} onClick={() => sendIntent(intent)}>Retry original {intent.kind} request</button>
+      </section>}
       <details className="admin-order"><summary>Integration health & café controls</summary>
         <p className="muted">Live integration: {health?.liveIntegration ?? "Loading…"} · Intake: {health?.intake} · Print evidence: {health?.printing}</p>
         <div className="admin-actions">
@@ -94,6 +139,9 @@ export default function Admin() {
           }}>Inspect mock catalog (not Clover sync)</button>
         </div>
         <h3>Reconciliation exceptions</h3>
+        {health?.reconciliationRequired?.map(job => <p className="notice" key={job.id}>
+          Payment outcome unknown · {job.aggregateId} · {job.attempts} lookup attempts. The worker is reconciling the original reference. Do not charge again.
+        </p>)}
         {!health?.deadLetters.length && <p className="fine">No dead-letter jobs reported. This does not prove every external system is healthy.</p>}
         {health?.deadLetters.map(job => <p className="notice" key={job.id}>{job.kind} · {job.aggregateId} · {job.lastError}{" "}
           <button className="text-button" disabled={busy} onClick={() => {
@@ -131,20 +179,24 @@ export default function Admin() {
           <details><summary>Purchase snapshot</summary><pre>{JSON.stringify(order.snapshot ?? order, null, 2)}</pre></details>
           {order.paymentState === "UNKNOWN_REQUIRES_RECONCILIATION" && <p className="notice">Do not charge again. The worker must reconcile the original attempt.</p>}
           <div className="admin-actions">
-            {(["SUBMITTED", "ACCEPTED", "PREPARING", "READY"] as string[]).includes(order.fulfillmentState) && order.paymentState === "PAID" &&
+            {(["SUBMITTED", "ACCEPTED", "PREPARING", "READY"] as string[]).includes(order.fulfillmentState) && ["PAID", "PARTIALLY_REFUNDED"].includes(order.paymentState) &&
               <button className="button" disabled={busy} onClick={() => {
                 const next: Record<string, string> = { SUBMITTED: "ACCEPTED", ACCEPTED: "PREPARING", PREPARING: "READY", READY: "COMPLETED" };
                 void action(order.id, "status", { status: next[order.fulfillmentState] });
               }}>{({ SUBMITTED: "Accept order", ACCEPTED: "Start preparing", PREPARING: "Mark ready", READY: "Complete pickup" } as Record<string, string>)[order.fulfillmentState]}</button>}
-            <button className="text-button" disabled={busy} onClick={() => {
-              if (window.confirm("Request a manually labeled reprint? This can duplicate a preparation ticket. Provider acceptance is not physical print evidence.")) void action(order.id, "reprint", { confirm: true, idempotencyKey: crypto.randomUUID() });
+            {["SUBMITTED", "ACCEPTED", "PREPARING", "READY"].includes(order.fulfillmentState) && ["PAID", "PARTIALLY_REFUNDED", "REFUNDED", "FAILED"].includes(order.paymentState) &&
+              <button className="text-button" disabled={busy} onClick={() => {
+                if (window.confirm("Cancel fulfillment only? This does NOT refund any payment. Review the payment and separately request an authorized refund when appropriate.")) void action(order.id, "status", { status: "CANCELLED" });
+              }}>Cancel fulfillment (does not refund)</button>}
+            <button className="text-button" disabled={busy || !!intent} onClick={() => {
+              if (window.confirm("Request a manually labeled reprint? This can duplicate a preparation ticket. Provider acceptance is not physical print evidence.")) void sendIntent({ id: order.id, kind: "reprint", payload: { confirm: true, idempotencyKey: crypto.randomUUID() } });
             }}>Request manual reprint</button>
-            {["PAID", "PARTIALLY_REFUNDED"].includes(order.paymentState) && <button className="text-button" disabled={busy} onClick={() => {
+            {["PAID", "PARTIALLY_REFUNDED"].includes(order.paymentState) && <button className="text-button" disabled={busy || !!intent} onClick={() => {
               const input = window.prompt("Refund amount in cents (for example 100 = $1.00). This invokes the mock payment provider, not just a local status change.");
               if (input === null) return;
               const amount = Number(input);
               if (!Number.isSafeInteger(amount) || amount <= 0) { setError("Enter a positive whole number of cents."); return; }
-              if (window.confirm(`Confirm provider refund of ${money(amount)}?`)) void action(order.id, "refund", { amount, confirm: true, idempotencyKey: crypto.randomUUID() });
+              if (window.confirm(`Confirm provider refund of ${money(amount)}?`)) void sendIntent({ id: order.id, kind: "refund", payload: { amount, confirm: true, idempotencyKey: crypto.randomUUID() } });
             }}>Refund…</button>}
           </div>
         </article>)}

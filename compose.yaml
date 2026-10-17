@@ -1,3 +1,8 @@
+x-app-build: &app-build
+  context: .
+  args:
+    NEXT_PUBLIC_BUSINESS_NAME: ${NEXT_PUBLIC_BUSINESS_NAME:-YaFI}
+    NEXT_PUBLIC_LOGO_PATH: ${NEXT_PUBLIC_LOGO_PATH:-}
 services:
   db:
     image: postgres:17.7-alpine
@@ -15,8 +20,8 @@ services:
       timeout: 5s
       retries: 20
   migrate:
-    build: .
-    env_file: .env
+    build: *app-build
+    env_file: ${YAFI_ENV_FILE:-.env}
     environment:
       DATABASE_URL: postgresql://yafi:${POSTGRES_PASSWORD}@db:5432/yafi?schema=public
     command: ["npm", "run", "db:migrate"]
@@ -24,8 +29,8 @@ services:
       db:
         condition: service_healthy
   web:
-    build: .
-    env_file: .env
+    build: *app-build
+    env_file: ${YAFI_ENV_FILE:-.env}
     environment:
       DATABASE_URL: postgresql://yafi:${POSTGRES_PASSWORD}@db:5432/yafi?schema=public
     ports:
@@ -35,8 +40,8 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
   worker:
-    build: .
-    env_file: .env
+    build: *app-build
+    env_file: ${YAFI_ENV_FILE:-.env}
     environment:
       DATABASE_URL: postgresql://yafi:${POSTGRES_PASSWORD}@db:5432/yafi?schema=public
     command: ["npm", "run", "worker"]

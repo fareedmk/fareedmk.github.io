@@ -3,6 +3,9 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 
 FROM base AS build
+ARG NEXT_PUBLIC_BUSINESS_NAME=YaFI
+ARG NEXT_PUBLIC_LOGO_PATH=
+ENV NEXT_PUBLIC_BUSINESS_NAME=$NEXT_PUBLIC_BUSINESS_NAME NEXT_PUBLIC_LOGO_PATH=$NEXT_PUBLIC_LOGO_PATH
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .

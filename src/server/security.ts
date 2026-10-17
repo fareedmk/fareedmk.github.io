@@ -69,8 +69,18 @@ export function route(handler: (request: NextRequest, context: { params: Promise
       const blocked = error instanceof Error && error.message === "LIVE_INTEGRATION_BLOCKED";
       const status = error instanceof HttpError ? error.status : blocked ? 503 : 500;
       const code = error instanceof HttpError ? error.code : blocked ? "INTEGRATION_BLOCKED" : "INTERNAL_ERROR";
+      const messages: Record<string, string> = {
+        PRICE_CHANGED: "The menu or promotion changed. Please request a fresh quote.",
+        AVAILABILITY_CHANGED: "An item, promotion, or pickup slot is no longer available. Please request a fresh quote.",
+        INTERNAL_ERROR: "The request could not be completed. Please try again.",
+        INTEGRATION_BLOCKED: "Only mock mode is available. Live integrations are blocked.",
+        PROMOTION_IN_USE: "This promotion has quote or order history. Disable it instead of deleting it.",
+      };
+      const message = messages[code] ?? code.toLowerCase().replaceAll("_", " ").replace(/^./, value => value.toUpperCase()) + ".";
       console.error(JSON.stringify({ correlationId, code }));
-      return NextResponse.json({ error: { code, correlationId } }, { status, headers: { "cache-control": "no-store" } });
+      return NextResponse.json({ error: { code, message, correlationId } }, {
+        status, headers: { "cache-control": "no-store", "x-correlation-id": correlationId },
+      });
     }
   };
 }

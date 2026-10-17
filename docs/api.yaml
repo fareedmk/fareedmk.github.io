@@ -12,6 +12,31 @@ info:
 servers:
   - url: http://localhost:3000
 paths:
+  /api/products/{id}:
+    get:
+      summary: Configured-location product details and modifier groups
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: product, mode mock }
+        '404': { description: Product not found in this location }
+  /api/cart/validate:
+    post:
+      summary: Nonreserving server-authoritative cart validation
+      description: |
+        Body contains lines, optional tip, optional code using QuoteInput field
+        schemas, without customer or slotId. Returns pricing and reservation false.
+        This is not a payable quote. A subsequent quote revalidates and reserves.
+      responses:
+        '200': { description: pricing, promotion explanation, reservation false, payableQuote false }
+        '409': { description: Invalid cart or unavailable promotion }
+  /api/promotions/evaluate:
+    post:
+      summary: Evaluate one app-managed percentage promotion on current cart
+      description: Same request/response as cart validation; not a redemption reservation.
+      responses:
+        '200': { description: pricing and promotion eligibility/explanation }
+        '409': { description: Unavailable or exhausted promotion }
   /api/menu:
     get:
       summary: Current mock location, categories, products and priced modifier groups
@@ -193,9 +218,12 @@ paths:
         '200': { description: Updated and audited }
   /api/admin/promotions:
     get:
-      summary: Up to 100 configured-location percentage codes
+      summary: Cursor-paginated configured-location percentage codes
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+        - { name: cursor, in: query, schema: { type: string } }
       responses:
-        '200': { description: promotions }
+        '200': { description: promotions, nextCursor, supportedKinds PERCENT }
     post:
       summary: Create/update one non-stacking full-cart percentage code
       requestBody:
@@ -212,6 +240,36 @@ paths:
                 active: { type: boolean }
       responses:
         '200': { description: Saved and audited }
+  /api/admin/promotions/{id}:
+    parameters:
+      - { name: id, in: path, required: true, schema: { type: string } }
+    get:
+      summary: Retrieve one location-owned percentage promotion
+      responses:
+        '200': { description: promotion }
+        '404': { description: Not found or wrong location }
+    patch:
+      summary: Update code, integer percent/percentBps, limit or active state
+      description: |
+        Body must contain at least one field and cannot supply both percent and
+        percentBps. Basis points must be multiples of 100 between 100 and 10000.
+        Existing reservations constrain reductions of redemption limits.
+      responses:
+        '200': { description: Updated promotion }
+        '409': { description: Code conflict or limit below reservations }
+    delete:
+      summary: Delete an unreferenced promotion after explicit confirmation
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { const: true }
+      responses:
+        '200': { description: Deleted and audited }
+        '409': { description: Referenced promotion cannot be deleted; disable instead }
   /api/admin/integration:
     get:
       summary: Honest mock/live gate, staff intake, print evidence, dead-letter exceptions

@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
-import { priceCart, DomainError, type Pricing } from "../domain";
+import { isDeepStrictEqual } from "node:util";
+import { priceCart, DomainError, type CartLine, type Pricing, type Product } from "../domain";
 import { mockScenarios } from "../adapters/provider";
 import { catalog } from "./catalog";
 import { db, locationId, serializable } from "./db";
@@ -28,6 +29,9 @@ export const checkoutInput = z.object({
 export type Snapshot = {
   pricing: Pricing; customer: z.infer<typeof quoteInput>["customer"];
   instructions?: string; slot: { id: string; startsAt: string }; currency: "USD"; timeZone: string;
+  catalog: Product[];
+  cart: CartLine[];
+  promotion?: { id: string; code: string; percentBps: number };
 };
 
 export function parse<T>(schema: z.ZodType<T>, value: unknown): T {
@@ -40,7 +44,7 @@ export function parse<T>(schema: z.ZodType<T>, value: unknown): T {
 export const reservationWhere = (now: Date): Prisma.QuoteWhereInput => ({
   OR: [
     { order: { is: null }, expiresAt: { gt: now } },
-    { order: { is: { paymentState: { notIn: ["DECLINED", "CANCELLED"] } } } },
+    { order: { is: { paymentState: { notIn: ["FAILED"] }, fulfillmentState: { not: "CANCELLED" } } } },
   ],
 });
 
@@ -60,9 +64,10 @@ export async function createQuote(input: z.infer<typeof quoteInput>, ownerHash: 
     if (promo && await tx.quote.count({ where: { promotionId: promo.id, ...reservationWhere(now) } }) >= promo.limit) {
       throw new HttpError(409, "PROMOTION_EXHAUSTED");
     }
+    const products = await catalog(tx);
     let pricing: Pricing;
     try {
-      pricing = priceCart(await catalog(tx), input.lines, promo ? {
+      pricing = priceCart(products, input.lines, promo ? {
         id: promo.id, code: promo.code, kind: "PERCENT", value: promo.percentBps / 100,
         minSpend: 0, maxDiscount: 1000000,
       } : undefined, input.tip);
@@ -72,7 +77,9 @@ export async function createQuote(input: z.infer<typeof quoteInput>, ownerHash: 
     }
     if (pricing.total <= 0 || pricing.total > 100000) throw new HttpError(400, "INVALID_TOTAL");
     const snapshot: Snapshot = { pricing, customer: input.customer, instructions: input.instructions,
-      slot: { id: slot.id, startsAt: slot.startsAt.toISOString() }, currency: "USD", timeZone: location.timeZone };
+      slot: { id: slot.id, startsAt: slot.startsAt.toISOString() }, currency: "USD", timeZone: location.timeZone,
+      catalog: products.filter(product => input.lines.some(line => line.productId === product.id)), cart: input.lines,
+      ...(promo ? { promotion: { id: promo.id, code: promo.code, percentBps: promo.percentBps } } : {}) };
     const quote = await tx.quote.create({ data: { locationId: location.id, slotId: slot.id, ownerHash,
       promotionId: promo?.id, expiresAt: new Date(Math.min(now.getTime() + 10 * 60000, slot.startsAt.getTime())),
       snapshot: JSON.parse(JSON.stringify(snapshot)) } });
@@ -101,13 +108,51 @@ export async function checkout(input: z.infer<typeof checkoutInput>, owner: stri
     if (quote.order) throw new HttpError(409, "QUOTE_ALREADY_USED");
     if (quote.expiresAt <= new Date()) throw new HttpError(409, "QUOTE_EXPIRED");
     if (quote.location.paused) throw new HttpError(409, "ORDERING_PAUSED");
+    const snapshot = jsonValue<Snapshot>(quote.snapshot);
+    // Older quotes without complete validation evidence must be refreshed, never charged.
+    if (!snapshot.catalog || !snapshot.cart) throw new HttpError(409, "PRICE_CHANGED");
+    const now = new Date();
+    const slot = await tx.slot.findFirst({ where: { id: quote.slotId, locationId: quote.locationId, startsAt: { gt: now } } });
+    if (!slot || slot.startsAt.toISOString() !== snapshot.slot.startsAt ||
+      await tx.quote.count({ where: { slotId: quote.slotId, ...reservationWhere(now) } }) > slot.capacity) {
+      throw new HttpError(409, "AVAILABILITY_CHANGED");
+    }
+    const products = await catalog(tx);
+    for (const original of snapshot.catalog) {
+      const current = products.find(product => product.id === original.id);
+      if (!current?.available) throw new HttpError(409, "AVAILABILITY_CHANGED");
+      const selected = snapshot.cart.filter(line => line.productId === current.id).flatMap(line => line.modifiers);
+      for (const selection of selected) {
+        const modifier = current.groups.flatMap(group => group.modifiers).find(modifier => modifier.id === selection.modifierId);
+        if (!modifier?.available || selection.quantity > modifier.maxQuantity) throw new HttpError(409, "AVAILABILITY_CHANGED");
+      }
+    }
+    const promo = quote.promotionId ? await tx.promotion.findUnique({ where: { id: quote.promotionId } }) : null;
+    if (quote.promotionId && (!promo?.active || promo.locationId !== quote.locationId ||
+      await tx.quote.count({ where: { promotionId: promo.id, ...reservationWhere(now) } }) > promo.limit)) {
+      throw new HttpError(409, "AVAILABILITY_CHANGED");
+    }
+    if (!isDeepStrictEqual(snapshot.promotion, promo ? { id: promo.id, code: promo.code, percentBps: promo.percentBps } : undefined)) {
+      throw new HttpError(409, "PRICE_CHANGED");
+    }
+    let currentPricing: Pricing;
+    try {
+      currentPricing = priceCart(products, snapshot.cart, promo ? {
+        id: promo.id, code: promo.code, kind: "PERCENT", value: promo.percentBps / 100, minSpend: 0, maxDiscount: 1000000,
+      } : undefined, snapshot.pricing.tip);
+    } catch (error) {
+      if (error instanceof DomainError) throw new HttpError(409, "AVAILABILITY_CHANGED");
+      throw error;
+    }
+    const currentCatalog = products.filter(product => snapshot.cart.some(line => line.productId === product.id));
+    if (!isDeepStrictEqual(JSON.parse(JSON.stringify(currentCatalog)), snapshot.catalog) ||
+      !isDeepStrictEqual(JSON.parse(JSON.stringify(currentPricing)), snapshot.pricing)) throw new HttpError(409, "PRICE_CHANGED");
     const order = await tx.order.create({ data: { locationId: quote.locationId, quoteId: quote.id,
       snapshot: jsonValue<Prisma.InputJsonValue>(quote.snapshot), trackingHash: hash(trackingToken),
       idempotencyKey: input.idempotencyKey, requestHash } });
-    const snapshot = jsonValue<Snapshot>(quote.snapshot);
     await tx.paymentAttempt.create({ data: { orderId: order.id, operation: "CHARGE", key: `charge:${order.id}`,
       payloadHash: requestHash, amount: snapshot.pricing.total } });
-    await enqueue(tx, "PAYMENT", order.id, `payment:${order.id}`, { scenario: input.mockScenario });
+    await enqueue(tx, "SUBMIT_ORDER", order.id, `submit:${order.id}`, { scenario: input.mockScenario });
     await tx.audit.create({ data: { actor: "customer", action: "CHECKOUT_INITIATED", aggregateId: order.id } });
     return { trackingToken, status: order.paymentState, orderId: order.id };
   });
@@ -116,6 +161,7 @@ export async function checkout(input: z.infer<typeof checkoutInput>, owner: stri
 export function publicOrder(order: { id: string; snapshot: Prisma.JsonValue; paymentState: string; integrationState: string; fulfillmentState: string; printState: string; refundedAmount: number; createdAt: Date }) {
   const snapshot = jsonValue<Snapshot>(order.snapshot);
   return { id: order.id, items: snapshot.pricing.lines, pricing: snapshot.pricing, slot: snapshot.slot,
+    total: snapshot.pricing.total, pickupAt: snapshot.slot.startsAt,
     currency: snapshot.currency, timeZone: snapshot.timeZone, paymentState: order.paymentState, integrationState: order.integrationState,
     fulfillmentState: order.fulfillmentState, printState: order.printState, refundedAmount: order.refundedAmount,
     createdAt: order.createdAt };

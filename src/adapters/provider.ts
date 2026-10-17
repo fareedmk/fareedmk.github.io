@@ -2,11 +2,12 @@ export const mockScenarios = ["SUCCESS", "DECLINE", "TIMEOUT_AFTER_SUCCESS", "OU
 export type MockScenario = typeof mockScenarios[number];
 export type PaymentResult = { state: "SUCCEEDED" | "DECLINED"; providerId: string };
 export interface PaymentProvider {
-  charge(input: { orderId: string; key: string; amount: number; scenario: MockScenario }): Promise<PaymentResult>;
+  charge(input: { orderId: string; providerOrderId: string; key: string; amount: number; scenario: MockScenario }): Promise<PaymentResult>;
   lookup(key: string): Promise<PaymentResult | null>;
   refund(input: { orderId: string; key: string; amount: number }): Promise<PaymentResult>;
 }
 export interface OrderProvider {
+  lookupOrder(orderId: string): Promise<{ providerId: string } | null>;
   submit(input: { orderId: string; pricing: Pricing; currency: string }): Promise<{ providerId: string }>;
   requestPrint(orderId: string, key: string, scenario: MockScenario): Promise<{ accepted: boolean }>;
 }

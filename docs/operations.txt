@@ -188,9 +188,11 @@ Security and operational launch gates
 The owner-only bootstrap is not complete Owner/Manager/Staff RBAC or MFA. No
 actual encrypted Clover secret store exists because live OAuth is disabled.
 Add verified production identity, tenant ownership foreign keys, least privilege,
-retention/deletion jobs, queue/backlog/ambiguity/intake alerts, request/worker
+retention/deletion jobs, external queue/backlog/ambiguity/intake alert delivery, request/worker
 correlation propagation, durable scheduled menu sync, stock behavior, webhook
 authentication + ownership checks + inbox processing, and provider notifications.
+Persistent reconciliation exceptions and dead letters are available in the
+owner dashboard; that does not replace paging or external monitoring.
 
 Tokenization reduces sensitive data exposure but does not eliminate PCI scope.
 Never accept PAN/CVV in these application endpoints, analytics, or server logs.

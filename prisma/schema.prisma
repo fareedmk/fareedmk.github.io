@@ -126,9 +126,10 @@ model Order {
   trackingRevoked  Boolean          @default(false)
   idempotencyKey   String
   requestHash      String
-  paymentState     String           @default("PENDING")
-  integrationState String           @default("PENDING")
-  fulfillmentState String           @default("NEW")
+  paymentState     String           @default("PROCESSING")
+  integrationState String           @default("NOT_CREATED")
+  fulfillmentState String           @default("SUBMITTED")
+  providerOrderId  String?          @unique
   printState       String           @default("NOT_REQUESTED")
   refundedAmount   Int              @default(0)
   createdAt        DateTime         @default(now())
