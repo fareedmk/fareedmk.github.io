@@ -1,0 +1,212 @@
+YaFI deployment, onboarding, and operations
+=========================================
+
+Delivery boundary
+-----------------
+This is a Phase 1 mock application, not a production-ready merchant deployment.
+No Clover merchant credentials, sandbox test cards, merchant hardware, printer,
+or verified merchant staff interface were available. No real payment, OAuth
+exchange, webhook acceptance, stock decrement, email, or SMS is enabled.
+Setting CLOVER_MODE=sandbox or production must fail closed. Never remove that
+gate just to make a demonstration appear connected.
+
+Business workflows and assumptions
+---------------------------------
+One US location, USD, America/Chicago, pickup only. A guest purchaser can select
+a separate recipient and provide international-format contact numbers. Browsing
+is independently hosted; payment acceptance remains subject to Clover terms,
+merchant underwriting, issuer rules, and regional availability.
+
+Customer flow: choose current items and required modifiers; reserve a server-
+priced quote and pickup capacity; review price; submit once; view private status.
+Staff flow: authenticate; inspect paid versus uncertain payments independently;
+accept paid orders; prepare; mark ready; complete pickup. Simulated refunds use
+the payment adapter; a failed printer never automatically triggers a refund.
+
+Architecture decisions
+----------------------
+ADR 1: One Next.js application, PostgreSQL, and one independent worker process.
+No unnecessary microservices. Durable jobs live in the same database as orders.
+PostgreSQL transactions, not browser state, arbitrate slot and promotion limits.
+
+ADR 2: Keep payment, integration, fulfillment, and print evidence separate.
+Provider order/payment/refund identities must remain associated with the local
+immutable purchase snapshot. Printing acceptance is not physical confirmation.
+
+ADR 3: Mock first, live fail closed. Candidate live architecture is tokenization
+plus an officially supported existing atomic order payment operation, ONLY after
+the capability matrix and a merchant sandbox spike prove every financial field,
+order identity, tax calculation, tip, payment verification, and refund link.
+Hosted Checkout is a separate candidate, not a fallback API mixed into that flow.
+Do not create a second order to mirror an independently collected payment.
+
+ADR 4: Persist immutable JSON purchase-time snapshots alongside relational
+catalog, quote, order, attempts, and orchestration data. This is not the complete
+normalized multi-merchant schema requested for later phases. Do not advertise
+general multi-tenancy merely because a locationId column exists.
+
+ADR 5: Phase 1 staff intake is the authenticated web queue. Native Clover intake,
+audible notifications, KDS, automatic ticket printing, and companion device apps
+remain separate verification/scoping exercises.
+
+Money and promotions
+--------------------
+All amounts are integer USD cents, rates basis points. Modifiers remain priced
+records, never silently free-text. Server domain logic rounds tax half-up per
+line on the discounted line amount. Discounts use deterministic largest-remainder
+allocation. Quote subtotal INCLUDES modifiers; modifierTotal is informational.
+UI displays base subtotal separately by subtracting modifierTotal.
+
+The initial connected promotion API is deliberately narrower than the requested
+full promotion engine. See README limitations and actual endpoint schemas.
+Pure domain functions additionally support fixed and BOGO rules, eligible item/
+category filters, minimum spend before discount, caps, and date bounds; this
+does NOT mean these rules are all persisted or exposed in the admin workflow.
+No native Clover promotion import or automatic online application is claimed.
+Unverified tax/discount policies must be compared with Clover before live use.
+
+State invariants
+----------------
+UNPAID -> PROCESSING -> PAID | FAILED | UNKNOWN_REQUIRES_RECONCILIATION.
+Unknown outcomes may only resolve by authoritative lookup or reviewed evidence,
+not by another automatic charge. PAID -> PARTIALLY_REFUNDED -> REFUNDED.
+Integration: NOT_CREATED -> CREATING -> SYNCED; failures -> RETRY_PENDING or
+ACTION_REQUIRED. Fulfillment: DRAFT -> SUBMITTED -> ACCEPTED -> PREPARING ->
+READY -> COMPLETED, with authorized cancellation paths. Do not infer one state
+from another; use the code's transition graphs as the executable contract.
+Refunds require an actual provider operation and bounded cumulative amount.
+
+Azure deployment option (not free)
+----------------------------------
+Use Azure Container Apps for web and a separately scaled continuously running
+worker, Azure Database for PostgreSQL Flexible Server, Azure Container Registry,
+Key Vault for secrets, managed identities, private database networking, and Azure
+Monitor / Log Analytics / Application Insights as appropriate. Terminate HTTPS
+at the platform and configure a fixed trusted APP_ORIGIN. Run migrations as a
+single release job, not on every web replica. Do not seed a live database.
+
+Minimum worker replicas must be >=1 to ensure background progress; web should
+also remain warm when required by checkout latency objectives. A timer-driven
+reconciler, external alert delivery, email/SMS service, and production identity
+provider are additional requirements, not implemented Azure resources here.
+
+Cost drivers: web/worker CPU, memory and minimum replicas; database compute,
+storage, HA and point-in-time retention; registry storage; logs ingestion and
+retention; Key Vault operations; networking/egress; domain/DNS; email/SMS; Clover
+account/payment processing and hardware costs. Budget from current regional
+Azure pricing and measured traffic. No zero-cost production claim is made.
+
+Do not deploy this server on GitHub Pages: it cannot run Next.js APIs, PostgreSQL,
+or a worker. This repository's original GitHub Pages name does not change that.
+
+Clover onboarding and permissions checklist
+-------------------------------------------
+[ ] Merchant approves deployment and supported US ecommerce account configuration.
+[ ] Confirm app distribution, regional API hosts, sandbox/production app IDs.
+[ ] Record exact least-privilege permissions from matrix; request no unused write
+    permissions. Orders/payment/refund permissions require explicit approval.
+[ ] Implement documented OAuth state/PKCE or applicable confidential-client flow,
+    validate state against expiring server-side session, rotate on use, bind
+    merchant/account returned by authoritative provider data.
+[ ] Encrypt integration secrets using managed KMS/Key Vault envelope encryption;
+    no plaintext tokens in database snapshots or logs. Implement current token
+    refresh/rotation/revocation policy and disconnect behavior.
+[ ] Confirm supported payment credentials, tokenization domain and CSP, PCI SAQ
+    eligibility with acquirer, authentication/challenge flow and card acceptance.
+[ ] Prove atomic order totals, discounts, modifiers, taxes, tips, and one original
+    Clover order/payment identity using actual sandbox receipts and API reads.
+[ ] Verify full/partial refunds, duplicate requests, response loss, delayed events.
+[ ] Confirm international card and traveler access policy directly with Clover.
+[ ] Enable neither wallets, saved cards, gift cards, loyalty nor pay-at-pickup
+    until separately verified and tested.
+
+Printer/device and intake acceptance checklist
+----------------------------------------------
+[ ] Identify target device/app, order type, default firing device, printer, and
+    merchant's installed application versions. Record evidence, not assumptions.
+[ ] Prove original order appears in the intended interface with exact item and
+    priced modifier IDs, financial discounts, taxes, tip, and paid status.
+[ ] Prove purchaser and separate recipient, contact, pickup time, and instructions
+    are visible using documented supported fields.
+[ ] Test staff acceptance, rejection, ready status, and any audible alerts.
+[ ] Verify whether Clover-device companion application or KDS vendor is required.
+[ ] Test printer offline, request timeout, duplicate request and manual reprint.
+[ ] Record REQUESTED vs provider ACCEPTED vs physical confirmed evidence.
+[ ] Verify delayed firing; otherwise schedule app print job at preparation time.
+[ ] Reconcile cash drawer, receipt, Clover reporting and external integrations
+    independently. Never infer accounting/loyalty/delivery updates from order POST.
+
+Refund runbook
+---------------
+1. Authenticate an authorized owner; verify original local and provider order/
+   payment references, amount, currency, and previous or pending refunds.
+2. Enter integer refund amount, confirm explicitly, keep the same idempotency key
+   while retrying the same intent. Never double-submit with a fresh key after
+   response loss. Inspect the durable attempt and provider result first.
+3. Worker invokes adapter refund; only a confirmed result changes refunded money.
+4. Confirm line/tax/tip refund allocations against original snapshots before
+   enabling live itemized refunds. Domain allocation helpers alone do not prove
+   the live refund mapping.
+5. Fulfillment cancellation and stock return are separate decisions. A refund
+   must not be implemented as merely setting CANCELLED or REFUNDED locally.
+6. This delivery only simulates refunds. Do not use it for real merchant refunds.
+
+Payment ambiguity / reconciliation runbook
+------------------------------------------
+1. Keep the order and original attempt. Do not retry a new payment or tell the
+   customer the order was cancelled when payment is unknown.
+2. Inspect outbox state and original provider idempotency key/reference. Use the
+   same adapter authoritative lookup; compare amount, currency, and order.
+3. If original result is definitively paid, persist it and resume safe intake.
+   If definitively declined, release appropriate reservations.
+4. If evidence remains ambiguous, escalate ACTION_REQUIRED and contact provider
+   support. Never turn "lookup unavailable" into permission to recharge.
+5. Paid-but-not-intaken: preserve paid order, alert staff, inspect queue, safely
+   retry intake; use authorized refund only when business policy calls for it.
+6. Dead-letter handling is an operator action after identifying cause. Inspect
+   attempt before requeueing any payment job. No blind "retry payment" button.
+
+Backup, recovery, and rotation
+------------------------------
+Use managed PITR plus encrypted backups. For local PostgreSQL use pg_dump custom
+format on the configured database and pg_restore into a NEW isolated database.
+Test restoration with matching application migration version, order/payment
+references, quote reservations, outbox and audit counts. Disable worker execution
+while validating restored data; never let two environments consume the same
+provider attempts. Define RPO/RTO and rehearse before pilot.
+
+ADMIN_PASSWORD bootstraps a stored scrypt hash once; changing the environment
+alone does NOT rotate an already bootstrapped credential. In a maintenance
+transaction invalidate Session records and remove the owner AdminCredential;
+set a newly generated bootstrap password before re-enabling login. Replace this
+manual development process with audited OIDC/MFA and named users before pilot.
+Rotate database and future Clover credentials independently. Redact tokens,
+tracking links, customer PII and request bodies from platform access/error logs.
+
+Security and operational launch gates
+-------------------------------------
+The owner-only bootstrap is not complete Owner/Manager/Staff RBAC or MFA. No
+actual encrypted Clover secret store exists because live OAuth is disabled.
+Add verified production identity, tenant ownership foreign keys, least privilege,
+retention/deletion jobs, queue/backlog/ambiguity/intake alerts, request/worker
+correlation propagation, durable scheduled menu sync, stock behavior, webhook
+authentication + ownership checks + inbox processing, and provider notifications.
+
+Tokenization reduces sensitive data exposure but does not eliminate PCI scope.
+Never accept PAN/CVV in these application endpoints, analytics, or server logs.
+The current CSP permits inline Next.js scripts/styles; adopt per-request CSP
+nonces and test provider-managed fields when enabling real payments.
+
+Production acceptance
+----------------------
+[ ] Phase 0 capability audit gaps closed by official docs plus merchant evidence.
+[ ] Phase 1 mock functional tests and migrations reproducible on clean database.
+[ ] Phase 2 OAuth lifecycle, authoritative sync and atomic payment association
+    proven in sandbox. No second paid mirror order exists.
+[ ] Phase 3 real staff/device intake, scheduled firing, refunds, notifications,
+    and failure/reconciliation drills signed off by merchant.
+[ ] Phase 4 independent security/PCI/privacy review, MFA/RBAC, tenant isolation,
+    restore drill, monitoring, incident escalation and cost budget approved.
+[ ] Controlled real-money pilot: approved card, decline, timeout, refund, partial
+    refund, inventory effects, tax/receipt reconciliation and duplicate submit.
+[ ] Merchant signs production acceptance; only then describe as production-ready.

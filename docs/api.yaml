@@ -1,0 +1,305 @@
+openapi: 3.1.0
+info:
+  title: YaFI Phase 1 application API
+  version: 0.1.0
+  description: |
+    These are application routes, NOT Clover endpoints. Mock-only. Live modes fail
+    with 503. Mutating requests require Origin matching APP_ORIGIN. Owner sessions
+    and quote ownership use HttpOnly SameSite=Strict cookies. All responses are
+    no-store; error envelopes contain error.code, error.message and correlationId.
+    Quotes reserve pickup/promo capacity for at most ten minutes. Checkout reuses
+    its idempotency key for the SAME payload and processes asynchronously.
+servers:
+  - url: http://localhost:3000
+paths:
+  /api/menu:
+    get:
+      summary: Current mock location, categories, products and priced modifier groups
+      responses:
+        '200':
+          description: mode, location, categories, products
+  /api/slots:
+    get:
+      summary: Future pickup slots with remaining capacity (up to 96)
+      responses:
+        '200':
+          description: slots array with id, startsAt (UTC), remaining
+  /api/quotes:
+    post:
+      summary: Validate current cart and reserve a priced expiring quote
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuoteInput'
+      responses:
+        '201':
+          description: id, expiresAt, pricing, token; owner and quote cookies set
+        '400':
+          description: Invalid schema or total
+        '409':
+          description: Invalid modifiers, unavailable item, promotion or slot conflict
+  /api/checkout:
+    post:
+      summary: Accept one current quote; create one order and durable payment intent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [quoteId, idempotencyKey]
+              properties:
+                quoteId: { type: string }
+                idempotencyKey: { type: string, minLength: 16, maxLength: 100 }
+                mockScenario:
+                  type: string
+                  enum: [SUCCESS, DECLINE, TIMEOUT_AFTER_SUCCESS, OUTAGE, PRINT_UNAVAILABLE]
+      responses:
+        '202':
+          description: trackingToken, status, orderId; not proof of successful payment
+        '404':
+          description: Quote does not belong to this browser/location
+        '409':
+          description: Quote stale/expired/used or conflicting idempotent payload; review before payment
+  /api/orders/{token}:
+    get:
+      summary: Private order/payment status; unguessable revocable bearer tracking token
+      parameters:
+        - { name: token, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Safe items/pricing, slot, separate lifecycle states; no purchaser contact data
+        '404':
+          description: Unknown, revoked or wrong-location token
+  /api/admin/session:
+    post:
+      summary: Owner bootstrap password login; shared persistent rate limit
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties:
+                password: { type: string, maxLength: 256 }
+      responses:
+        '200':
+          description: Owner role, expiring HttpOnly session cookie
+        '401':
+          description: Authentication failed
+    delete:
+      summary: Revoke current owner session
+      responses:
+        '200': { description: Logged out }
+  /api/admin/orders:
+    get:
+      summary: Latest configured-location orders (bounded to 100)
+      description: No cursor pagination yet; not a complete historical export.
+      responses:
+        '200': { description: orders with purchase data and authorized purchaser/recipient information }
+        '401': { description: Owner session required }
+  /api/admin/orders/{id}/status:
+    post:
+      summary: Valid paid-order fulfillment transition, audited
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [ACCEPTED, PREPARING, READY, COMPLETED, CANCELLED] }
+      responses:
+        '200': { description: Updated order }
+        '409': { description: Invalid transition/payment invariant }
+  /api/admin/orders/{id}/refund:
+    post:
+      summary: Authorize an original-payment mock provider refund via durable job
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [amount, confirm, idempotencyKey]
+              properties:
+                amount: { type: integer, minimum: 1, maximum: 100000 }
+                confirm: { const: true }
+                idempotencyKey: { type: string, minLength: 16, maxLength: 100 }
+      responses:
+        '202': { description: Original refund attempt queued; not yet confirmed }
+        '409': { description: Excess cumulative refund or idempotency conflict }
+  /api/admin/orders/{id}/reprint:
+    post:
+      summary: Explicit manual print request; never claims physical confirmation
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm, idempotencyKey]
+              properties:
+                confirm: { const: true }
+                idempotencyKey: { type: string, minLength: 16 }
+                mockScenario: { enum: [SUCCESS, PRINT_UNAVAILABLE] }
+      responses:
+        '202': { description: REQUESTED, physicalPrintConfirmed false }
+  /api/admin/orders/{id}/tracking/revoke:
+    post:
+      summary: Revoke an order tracking link
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Revoked and audited }
+  /api/admin/location:
+    post:
+      summary: Pause/resume new ordering without discarding paid orders
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [paused]
+              properties:
+                paused: { type: boolean }
+      responses:
+        '200': { description: Updated pause state }
+  /api/admin/slots:
+    get:
+      summary: Up to 96 future slots and reserved/capacity counts
+      responses:
+        '200': { description: slots }
+    post:
+      summary: Update capacity without dropping below existing reservations
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slotId, capacity]
+              properties:
+                slotId: { type: string }
+                capacity: { type: integer, minimum: 0, maximum: 200 }
+      responses:
+        '200': { description: Updated and audited }
+  /api/admin/promotions:
+    get:
+      summary: Up to 100 configured-location percentage codes
+      responses:
+        '200': { description: promotions }
+    post:
+      summary: Create/update one non-stacking full-cart percentage code
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [code, percent, limit, active]
+              properties:
+                code: { type: string, pattern: '^[A-Z0-9_-]{3,32}$' }
+                percent: { type: integer, minimum: 1, maximum: 100 }
+                limit: { type: integer, minimum: 0, maximum: 100000 }
+                active: { type: boolean }
+      responses:
+        '200': { description: Saved and audited }
+  /api/admin/integration:
+    get:
+      summary: Honest mock/live gate, staff intake, print evidence, dead-letter exceptions
+      responses:
+        '200': { description: Integration health }
+  /api/admin/sync:
+    post:
+      summary: Inspect persistent mock catalog; explicitly NOT a Clover import
+      responses:
+        '200': { description: Mock mode product count and explanatory message }
+  /api/admin/jobs/{id}/retry:
+    post:
+      summary: Audited original-job retry after operator review; no new payment intent
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm]
+              properties:
+                confirm: { const: true }
+      responses:
+        '202': { description: Original job requeued }
+  /api/clover/oauth:
+    get:
+      summary: Disabled OAuth integration boundary; not a working callback
+      responses:
+        '503': { description: Official flow and state/token lifecycle unverified }
+  /api/clover/webhooks:
+    post:
+      summary: Disabled webhook boundary; does not accept unauthenticated events
+      responses:
+        '503': { description: Official authentication and event contract unverified }
+  /api/health:
+    get:
+      summary: Database connectivity and mock-mode liveness
+      responses:
+        '200': { description: status ok, mode mock }
+        '503': { description: Live mode blocked }
+components:
+  schemas:
+    QuoteInput:
+      type: object
+      additionalProperties: false
+      required: [lines, slotId, customer]
+      properties:
+        lines:
+          type: array
+          minItems: 1
+          maxItems: 30
+          items:
+            type: object
+            required: [productId, quantity, modifiers]
+            properties:
+              productId: { type: string }
+              quantity: { type: integer, minimum: 1, maximum: 20 }
+              instructions: { type: string, maxLength: 300 }
+              modifiers:
+                type: array
+                maxItems: 20
+                items:
+                  type: object
+                  required: [modifierId, quantity]
+                  properties:
+                    modifierId: { type: string }
+                    quantity: { type: integer, minimum: 1, maximum: 10 }
+        slotId: { type: string }
+        tip: { type: integer, minimum: 0, maximum: 10000, default: 0 }
+        code: { type: string, maxLength: 120 }
+        instructions: { type: string, maxLength: 500 }
+        customer:
+          type: object
+          required: [name, email, phone]
+          properties:
+            name: { type: string, maxLength: 120 }
+            email: { type: string, format: email, maxLength: 254 }
+            phone: { type: string, pattern: '^[+()\d .-]{7,30}$' }
+            recipientName: { type: string, maxLength: 120 }
+            recipientPhone: { type: string, pattern: '^[+()\d .-]{7,30}$' }
+            marketingConsent: { type: boolean, default: false }
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            correlationId: { type: string }

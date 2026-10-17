@@ -1,0 +1,39 @@
+sequenceDiagram
+  actor C as Customer
+  participant A as Application
+  participant D as PostgreSQL
+  participant W as Durable worker
+  participant P as Persistent mock provider
+  actor S as Staff
+  C->>A: Cart, modifiers, recipient, contact, slot, promo
+  A->>D: Serializable validate and reserve quote
+  D-->>C: Expiring authoritative quote
+  C->>A: Accept quote + stable idempotency key
+  A->>D: Revalidate; create one order, attempt, outbox
+  alt quote expired or menu changed
+    A-->>C: Conflict; review a fresh quote before payment
+  else committed checkout
+    A-->>C: Private tracking link; payment processing
+    W->>D: Claim durable job with lease
+    W->>P: Create/reconcile original provider order
+    W->>P: Pay original order once
+    alt confirmed paid
+      P-->>W: Authoritative payment reference
+      W->>D: Persist paid + notification/intake outbox
+    else definite decline
+      P-->>W: Declined
+      W->>D: Failed; release capacity/promo reservation
+    else charge succeeds but response is lost
+      W->>D: UNKNOWN_REQUIRES_RECONCILIATION
+      W->>P: Look up original attempt; never start a new charge
+      P-->>W: Original authoritative result
+      W->>D: Persist reconciled state
+    end
+    alt intake or print request fails
+      W->>D: Preserve payment; retry safe job / dead-letter alert
+      Note over W,S: Print acceptance is not physical print evidence
+    end
+    S->>A: Accept / preparing / ready / complete
+    C->>A: Poll private status
+    A-->>C: Separate payment and fulfillment states
+  end

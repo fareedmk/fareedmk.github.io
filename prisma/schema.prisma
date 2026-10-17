@@ -1,0 +1,219 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Location {
+  id         String      @id
+  name       String
+  timeZone   String      @default("America/Chicago")
+  paused     Boolean     @default(false)
+  categories Category[]
+  products   Product[]
+  slots      Slot[]
+  promotions Promotion[]
+  quotes     Quote[]
+  orders     Order[]
+}
+
+model Category {
+  id         String    @id
+  locationId String
+  location   Location  @relation(fields: [locationId], references: [id])
+  name       String
+  products   Product[]
+}
+
+model Product {
+  id          String          @id
+  locationId  String
+  location    Location        @relation(fields: [locationId], references: [id])
+  categoryId  String
+  category    Category        @relation(fields: [categoryId], references: [id])
+  cloverId    String          @unique
+  name        String
+  description String
+  price       Int
+  available   Boolean         @default(true)
+  version     Int             @default(1)
+  taxId       String
+  tax         TaxRate         @relation(fields: [taxId], references: [id])
+  groups      ModifierGroup[]
+}
+
+model TaxRate {
+  id       String    @id
+  name     String
+  bps      Int
+  products Product[]
+}
+
+model ModifierGroup {
+  id        String     @id
+  productId String
+  product   Product    @relation(fields: [productId], references: [id])
+  name      String
+  min       Int
+  max       Int
+  modifiers Modifier[]
+}
+
+model Modifier {
+  id          String        @id
+  groupId     String
+  group       ModifierGroup @relation(fields: [groupId], references: [id])
+  cloverId    String        @unique
+  name        String
+  price       Int
+  available   Boolean       @default(true)
+  maxQuantity Int           @default(1)
+}
+
+model Slot {
+  id         String   @id @default(cuid())
+  locationId String
+  location   Location @relation(fields: [locationId], references: [id])
+  startsAt   DateTime
+  capacity   Int
+  quotes     Quote[]
+
+  @@unique([locationId, startsAt])
+}
+
+model Promotion {
+  id         String   @id @default(cuid())
+  locationId String
+  location   Location @relation(fields: [locationId], references: [id])
+  code       String
+  percentBps Int
+  limit      Int
+  active     Boolean  @default(true)
+  quotes     Quote[]
+
+  @@unique([locationId, code])
+}
+
+model Quote {
+  id          String     @id @default(cuid())
+  locationId  String
+  location    Location   @relation(fields: [locationId], references: [id])
+  slotId      String
+  slot        Slot       @relation(fields: [slotId], references: [id])
+  promotionId String?
+  promotion   Promotion? @relation(fields: [promotionId], references: [id])
+  ownerHash   String
+  snapshot    Json
+  expiresAt   DateTime
+  createdAt   DateTime   @default(now())
+  order       Order?
+
+  @@index([slotId, expiresAt])
+  @@index([promotionId, expiresAt])
+}
+
+model Order {
+  id               String           @id @default(cuid())
+  locationId       String
+  location         Location         @relation(fields: [locationId], references: [id])
+  quoteId          String           @unique
+  quote            Quote            @relation(fields: [quoteId], references: [id])
+  snapshot         Json
+  trackingHash     String           @unique
+  trackingRevoked  Boolean          @default(false)
+  idempotencyKey   String
+  requestHash      String
+  paymentState     String           @default("PENDING")
+  integrationState String           @default("PENDING")
+  fulfillmentState String           @default("NEW")
+  printState       String           @default("NOT_REQUESTED")
+  refundedAmount   Int              @default(0)
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+  attempts         PaymentAttempt[]
+
+  @@unique([locationId, idempotencyKey])
+  @@index([locationId, createdAt])
+}
+
+model PaymentAttempt {
+  id          String   @id @default(cuid())
+  orderId     String
+  order       Order    @relation(fields: [orderId], references: [id])
+  operation   String
+  key         String   @unique
+  payloadHash String
+  amount      Int
+  state       String   @default("PENDING")
+  providerId  String?
+  createdAt   DateTime @default(now())
+}
+
+model MockProviderRecord {
+  id         String   @id @default(cuid())
+  key        String   @unique
+  orderId    String
+  operation  String
+  amount     Int
+  state      String
+  payload    Json     @default("{}")
+  providerId String   @unique
+  createdAt  DateTime @default(now())
+}
+
+model Outbox {
+  id          String    @id @default(cuid())
+  kind        String
+  aggregateId String
+  dedupeKey   String    @unique
+  payload     Json
+  state       String    @default("PENDING")
+  attempts    Int       @default(0)
+  availableAt DateTime  @default(now())
+  leaseUntil  DateTime?
+  leaseToken  String?
+  lastError   String?
+  createdAt   DateTime  @default(now())
+
+  @@index([state, availableAt])
+}
+
+model Inbox {
+  id         String   @id @default(cuid())
+  source     String
+  externalId String
+  payload    Json
+  createdAt  DateTime @default(now())
+
+  @@unique([source, externalId])
+}
+
+model Audit {
+  id            String   @id @default(cuid())
+  actor         String
+  action        String
+  aggregateId   String?
+  correlationId String?
+  createdAt     DateTime @default(now())
+}
+
+model Session {
+  id        String   @id
+  role      String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model AdminCredential {
+  id           String @id
+  passwordHash String
+}
+
+model RateLimit {
+  id        String   @id
+  count     Int
+  expiresAt DateTime
+}

@@ -1,0 +1,18 @@
+flowchart LR
+  Customer["Mobile storefront / guest checkout"]
+  Staff["Authenticated staff web queue"]
+  API["Next.js server APIs\nZod / origin checks / tenant scope"]
+  Domain["Integer pricing / modifier validation\nIndependent state machines"]
+  PG[("PostgreSQL\ncatalog / quotes / reservations\norders / attempts / audit / outbox")]
+  Worker["Durable worker\nleases / backoff / dead letters"]
+  Mock["Persistent mock provider\norders / payments / refunds / print requests"]
+  Live["Clover OAuth / inventory / atomic orders\nEcommerce existing-order payment\nBLOCKED pending verification"]
+  Notifications["Mock notifications\nNo real email or SMS"]
+  Customer --> API
+  Staff --> API
+  API --> Domain
+  API --> PG
+  Worker <--> PG
+  Worker --> Mock
+  Worker -. "future verified adapter" .-> Live
+  Worker --> Notifications
